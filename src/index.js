@@ -31,7 +31,7 @@ const NS = settingsNamespace('task-notify')
  */
 const ICON_PATH = fileURLToPath(new URL('../deepseek.png', import.meta.url))
 
-/** Durable settings section schema (defaults: push off, main-turn off). */
+/** Durable settings section schema (defaults: push off, main-turn off, attention kinds on). */
 const SettingsSchema = z.object({
   push: z.boolean().default(false),
   token: z.string().default(''),
@@ -39,10 +39,22 @@ const SettingsSchema = z.object({
   agent: z.boolean().default(false),
   subagent: z.boolean().default(true),
   workflow: z.boolean().default(true),
+  approval: z.boolean().default(true),
+  question: z.boolean().default(true),
 })
 
 const kindLabel = (kind) =>
-  kind === 'subagent' ? '子代理任务' : kind === 'workflow' ? '工作流' : kind === 'agent' ? 'Agent 回合' : '提醒'
+  kind === 'subagent' ? '子代理任务'
+    : kind === 'workflow' ? '工作流'
+      : kind === 'agent' ? 'Agent 回合'
+        : kind === 'approval' ? '审批请求'
+          : kind === 'question' ? '询问' : '提醒'
+
+/** Per-kind toast / push title. */
+const kindTitle = (kind) =>
+  kind === 'approval' ? '需要你的审批'
+    : kind === 'question' ? 'Agent 正在问你'
+      : 'Agent任务完成'
 
 /** '2026/8/17 13:37:53' */
 const fmtDate = (at) => {
@@ -60,15 +72,21 @@ const STATUS_TEXT = {
   refusal: '拒绝',
   cancelled: '取消',
   结束: '结束',
+  '需要审批': '需要审批',
+  '等待回答': '等待回答',
 }
 const statusLabel = (status) => STATUS_TEXT[status] ?? String(status)
 
-/** The push content template lines: 会话 / 时间 / 描述. */
-const bodyLines = (item) => [
-  '会话：' + item.title,
-  '时间：' + fmtDate(item.at),
-  '描述：' + statusLabel(item.status),
-]
+/** The push content template lines: 会话 / 时间 / 描述 (+ optional detail). */
+const bodyLines = (item) => {
+  const lines = [
+    '会话：' + item.title,
+    '时间：' + fmtDate(item.at),
+    '描述：' + statusLabel(item.status),
+  ]
+  if (typeof item.detail === 'string' && item.detail !== '') lines.push(item.detail)
+  return lines
+}
 const pushBody = (item) => bodyLines(item).join('\n')
 
 /**
@@ -211,6 +229,78 @@ export function apply(ctx) {
   // event carries no session lineage (workflow/end has none).
   let currentRoot = undefined
 
+  /**
+   * The session's effective approval policy: its own `approval/policy` fold
+   * (per-session override, e.g. a permission-preset switch), else the
+   * deployment default from the ApprovalService config. The seam is optional
+   * (`ctx.get('approval')`); without it no ask can ever be raised, so the
+   * fallback value only decides whether a hypothetical ask would notify.
+   */
+  const effectiveApprovalPolicy = (session) => {
+    try {
+      const approval = ctx.get('approval')
+      if (approval === undefined) return 'ask'
+      const override = approval.overrideOf(session)
+      if (override !== undefined) return override
+      const policy = approval.config?.policy
+      if (policy !== undefined) return policy
+      return 'ask'
+    } catch {
+      return 'ask'
+    }
+  }
+
+  /**
+   * Attention notifications: the agent stopped and the USER must act.
+   *  - approval/asked: an approval question reached the answerer chain
+   *    (escalation / privileged execution). Notify only under policy `ask`
+   *    — under `never` the ask is auto-rejected and no manual elevation is
+   *    possible.
+   *  - tool/call ask_user_question: the agent actively paused to consult the
+   *    user (plain questions and plan-review intents alike).
+   * session/event is a live, post-commit append feed (no startup replay), so
+   * every event here is a fresh ask; dedup keys are the durable ids.
+   */
+  ctx.on('session/event', (session, event) => {
+    if (event.type === 'approval/asked') {
+      if (!settings.get().approval) return
+      if (effectiveApprovalPolicy(session) !== 'ask') return
+      const root = rootOf(session) ?? currentRoot
+      if (root !== undefined) currentRoot = root
+      const toolName = String(event.data.toolName ?? '')
+      const reason = event.data.reason
+      notify('ap:' + String(event.data.id), {
+        kind: 'approval',
+        title: titleOf(root) ?? titleOf(session) ?? 'Agent 回合',
+        status: '需要审批',
+        detail: '工具：' + toolName + (typeof reason === 'string' && reason !== '' ? '，原因：' + reason : ''),
+      })
+      return
+    }
+    if (event.type === 'tool/call' && event.data.name === 'ask_user_question') {
+      if (!settings.get().question) return
+      const root = rootOf(session) ?? currentRoot
+      if (root !== undefined) currentRoot = root
+      // arguments is a JSON string; the first question text becomes the
+      // notification's detail line. Fail soft on any malformed payload.
+      let text = ''
+      try {
+        const args = JSON.parse(String(event.data.arguments ?? '{}'))
+        const first = Array.isArray(args?.questions) ? args.questions[0] : undefined
+        if (first !== null && first !== undefined && typeof first.question === 'string') {
+          text = first.question
+        }
+      } catch { /* 忽略格式问题 */ }
+      if (text.length > 100) text = text.slice(0, 100) + '…'
+      notify('qu:' + String(event.data.callId), {
+        kind: 'question',
+        title: titleOf(root) ?? titleOf(session) ?? 'Agent 回合',
+        status: '等待回答',
+        detail: text === '' ? '（请查看界面）' : text,
+      })
+    }
+  })
+
   // 3-second dedup window: a subagent's own `agent/status` idle lands right
   // after its `subagent/end`; only the first of the pair becomes a toast.
   const seen = new Map()
@@ -227,12 +317,13 @@ export function apply(ctx) {
     const item = Object.assign({ at: now }, msg)
     runtime.queue.push(item)
     if (runtime.queue.length > 20) runtime.queue.shift()
+    const title = kindTitle(item.kind)
     // Desktop channel: a real Windows toast with the system notification sound.
-    showWindowsToast('Agent任务完成', bodyLines(item)).then((outcome) => {
+    showWindowsToast(title, bodyLines(item)).then((outcome) => {
       if (outcome.ok !== true) console.error('[dsh-task-notify] windows toast failed:', outcome.error)
     }, () => {})
     if (s.push && s.token !== '') {
-      pushToPushPlus(s.token, 'Agent任务完成', pushBody(item)).catch((error) => {
+      pushToPushPlus(s.token, title, pushBody(item)).catch((error) => {
         console.error('[dsh-task-notify] push failed:', error)
       })
     }

@@ -1,7 +1,7 @@
 {
   "name": "dsh-task-notify",
-  "version": "1.0.0",
-  "description": "DSH web plugin: agent/subagent/workflow completion toasts with optional PushPlus push notifications",
+  "version": "1.1.0",
+  "description": "DSH web plugin: agent/subagent/workflow completion, approval-required, and user-question toasts with optional PushPlus push notifications",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",

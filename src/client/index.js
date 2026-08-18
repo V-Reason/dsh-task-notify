@@ -461,6 +461,7 @@ export function apply(ctx) {
     if (!panelOpen) return null
     const settings = draft ?? lastSettings ?? {
       push: false, token: '', enabled: true, agent: false, subagent: true, workflow: true,
+      approval: true, question: true,
     }
     const masterOn = settings.enabled !== false
     const toggle = (key) => (event) => setDraft(Object.assign({}, settings, { [key]: event.target.checked }))
@@ -520,6 +521,8 @@ export function apply(ctx) {
       row('agent', '主回合'),
       row('subagent', '子代理'),
       row('workflow', '工作流'),
+      row('approval', '需要审批'),
+      row('question', '询问用户'),
     ]),
     section('push', true, [
       React.createElement('div', { className: 'dtn_row' },
