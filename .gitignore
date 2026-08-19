@@ -9,6 +9,9 @@ lib/
 *.tmp
 *.bak
 
+# 本地测试夹具
+toTest/
+
 # 系统文件
 .DS_Store
 Thumbs.db

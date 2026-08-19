@@ -21,7 +21,7 @@ const isObj = (value) => value !== null && typeof value === 'object' && !Array.i
 const settingsSchema = {
   parse(value) {
     if (!isObj(value)) fail('settings', 'object')
-    for (const key of ['push', 'agent', 'subagent', 'workflow', 'approval', 'question']) {
+    for (const key of ['push', 'agent', 'subagent', 'workflow', 'approval', 'question', 'plan', 'goal']) {
       if (!isBool(value[key])) fail('settings.' + key, 'boolean')
     }
     if (value.enabled !== undefined && !isBool(value.enabled)) fail('settings.enabled', 'boolean')
@@ -36,17 +36,19 @@ const settingsSchema = {
       workflow: value.workflow,
       approval: value.approval,
       question: value.question,
+      plan: value.plan,
+      goal: value.goal,
     }
   },
 }
 
-const ITEM_KINDS = ['subagent', 'workflow', 'agent', 'test', 'approval', 'question']
+const ITEM_KINDS = ['subagent', 'workflow', 'agent', 'test', 'approval', 'question', 'plan', 'goal']
 
 /** One notification item, owned JSON produced by the Host. */
 const itemSchema = {
   parse(value) {
     if (!isObj(value)) fail('item', 'object')
-    if (!ITEM_KINDS.includes(value.kind)) fail('item.kind', 'subagent|workflow|agent|test|approval|question')
+    if (!ITEM_KINDS.includes(value.kind)) fail('item.kind', 'subagent|workflow|agent|test|approval|question|plan|goal')
     if (!isStr(value.title)) fail('item.title', 'string')
     if (!isStr(value.status)) fail('item.status', 'string')
     if (!isNum(value.at)) fail('item.at', 'number')
@@ -172,7 +174,7 @@ export const TYPERT_MANIFEST = {
       {
         key: 'taskNotify',
         exportName: 'TaskNotifyRuntime',
-        description: 'Agent/subagent/workflow completion, approval-required, and user-question notification queue, PushPlus push, and durable settings.',
+        description: 'Agent/subagent/workflow completion, approval-required, user-question, plan-review, and goal-blocked notification queue, PushPlus push, and durable settings.',
         tags: [],
         members: [
           { kind: 'method', name: 'getSettings', signature: 'getSettings(): TaskNotifySettings' },

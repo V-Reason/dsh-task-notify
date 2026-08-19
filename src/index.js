@@ -41,6 +41,8 @@ const SettingsSchema = z.object({
   workflow: z.boolean().default(true),
   approval: z.boolean().default(true),
   question: z.boolean().default(true),
+  plan: z.boolean().default(true),
+  goal: z.boolean().default(true),
 })
 
 const kindLabel = (kind) =>
@@ -48,13 +50,17 @@ const kindLabel = (kind) =>
     : kind === 'workflow' ? '工作流'
       : kind === 'agent' ? 'Agent 回合'
         : kind === 'approval' ? '审批请求'
-          : kind === 'question' ? '询问' : '提醒'
+          : kind === 'question' ? '询问'
+            : kind === 'plan' ? '计划确认'
+              : kind === 'goal' ? '目标受阻' : '提醒'
 
 /** Per-kind toast / push title. */
 const kindTitle = (kind) =>
   kind === 'approval' ? '需要你的审批'
     : kind === 'question' ? 'Agent 正在问你'
-      : 'Agent任务完成'
+      : kind === 'plan' ? '计划待你确认'
+        : kind === 'goal' ? '目标受阻'
+          : 'Agent任务完成'
 
 /** '2026/8/17 13:37:53' */
 const fmtDate = (at) => {
@@ -71,9 +77,13 @@ const STATUS_TEXT = {
   'max-tokens': '超出上限',
   refusal: '拒绝',
   cancelled: '取消',
+  blocked: '阻塞',
+  interrupted: '中断',
   结束: '结束',
-  '需要审批': '需要审批',
-  '等待回答': '等待回答',
+  需要审批: '需要审批',
+  等待回答: '等待回答',
+  等待确认: '等待确认',
+  需要处理: '需要处理',
 }
 const statusLabel = (status) => STATUS_TEXT[status] ?? String(status)
 
@@ -251,6 +261,65 @@ export function apply(ctx) {
   }
 
   /**
+   * Whether plan mode is in force for a session: the last logged `plan/mode`
+   * wins, a log with none folds to inactive. Same fold as the harness's
+   * `foldPlanMode`, re-implemented here to avoid a new peer dependency.
+   */
+  const planModeActive = (session) => {
+    if (session === undefined || session === null) return false
+    let active = false
+    try {
+      for (const event of session.events) {
+        if (event.type === 'plan/mode') active = event.data.active === true
+      }
+    } catch { /* 忽略 */ }
+    return active
+  }
+
+  /** The plan's first markdown heading (any level), or undefined when it has none. */
+  const planHeading = (plan) => {
+    for (const line of String(plan).split('\n')) {
+      const match = /^#{1,6}\s+(.+?)\s*$/.exec(line)
+      if (match !== null) return match[1]
+    }
+    return undefined
+  }
+
+  /**
+   * Whether the event's session is a LIVE ROOT agent. Interactive asks
+   * (`ask_user_question`, `exit_plan_mode`) throw DELEGATED_CALLER for
+   * agents owned by another live agent — the question never reaches the
+   * user, so a `tool/call` there must not notify. Without the agents
+   * registry (headless compositions) nothing is suppressed.
+   */
+  const isLiveRootSession = (session) => {
+    if (session === undefined || session === null) return true
+    const agents = ctx.get('agents')
+    if (agents === undefined) return true
+    try {
+      const agent = agents.get(session.id)
+      if (agent === undefined || agent.session !== session) return true
+      return agents.roots().includes(agent)
+    } catch {
+      return true
+    }
+  }
+
+  /** Label of the last `turn/end` reason for the session (fallback 结束). */
+  const turnEndLabel = (session) => {
+    if (session === undefined || session === null) return '结束'
+    try {
+      for (let index = session.events.length - 1; index >= 0; index -= 1) {
+        const event = session.events[index]
+        if (event.type !== 'turn/end') continue
+        const label = STATUS_TEXT[event.data?.reason?.kind]
+        return label ?? '结束'
+      }
+    } catch { /* 忽略 */ }
+    return '结束'
+  }
+
+  /**
    * Attention notifications: the agent stopped and the USER must act.
    *  - approval/asked: an approval question reached the answerer chain
    *    (escalation / privileged execution). Notify only under policy `ask`
@@ -279,6 +348,9 @@ export function apply(ctx) {
     }
     if (event.type === 'tool/call' && event.data.name === 'ask_user_question') {
       if (!settings.get().question) return
+      // A delegated child's ask fails with DELEGATED_CALLER before any UI
+      // shows it — only live root agents can pause for a human answer.
+      if (!isLiveRootSession(session)) return
       const root = rootOf(session) ?? currentRoot
       if (root !== undefined) currentRoot = root
       // arguments is a JSON string; the first question text becomes the
@@ -297,6 +369,59 @@ export function apply(ctx) {
         title: titleOf(root) ?? titleOf(session) ?? 'Agent 回合',
         status: '等待回答',
         detail: text === '' ? '（请查看界面）' : text,
+      })
+      return
+    }
+    // Plan review: the agent called exit_plan_mode and is blocked on the
+    // user's approve / keep-planning decision (the plan-review intent of the
+    // user-questions channel). tool/call fires at dispatch, exactly when the
+    // plan is presented. Every guard mirrors a path where the tool fails
+    // BEFORE the review can appear — no guard, no toast.
+    if (event.type === 'tool/call' && event.data.name === 'exit_plan_mode') {
+      if (!settings.get().plan) return
+      if (!isLiveRootSession(session)) return
+      if (ctx.get('userQuestions') === undefined) return
+      if (!planModeActive(session)) return
+      let plan = ''
+      try {
+        const args = JSON.parse(String(event.data.arguments ?? '{}'))
+        if (typeof args?.plan === 'string') plan = args.plan
+      } catch { /* 忽略格式问题 */ }
+      if (!/^#\s+\S/.test(plan.trim())) return
+      const heading = planHeading(plan)
+      const excerpt = plan
+        .replace(/^#{1,6}\s+.*$/m, '') // 去掉标题行
+        .trim().replace(/\s+/g, ' ') // 压平换行
+      const excerptText = excerpt.length > 60 ? excerpt.slice(0, 60) + '…' : excerpt
+      const root = rootOf(session) ?? currentRoot
+      if (root !== undefined) currentRoot = root
+      notify('pr:' + String(event.data.callId), {
+        kind: 'plan',
+        title: titleOf(root) ?? titleOf(session) ?? 'Agent 回合',
+        status: '等待确认',
+        detail: '标题：' + (heading ?? '（无标题）')
+          + (excerptText === '' ? '' : '\n摘要：' + excerptText),
+      })
+      return
+    }
+    // Goal blocked: the autonomous goal run ended on a persistent blocker
+    // (model-reported or round-limit) — the user must resolve it or clear
+    // the goal. Durable `goal/change` operation 'block' carries the full
+    // snapshot; the fold invariant guarantees phase 'blocked' with a reason.
+    if (event.type === 'goal/change' && event.data?.operation === 'block') {
+      if (!settings.get().goal) return
+      const goal = event.data.goal
+      const message = goal?.blockedReason?.message
+      const reason = typeof message === 'string' && message !== ''
+        ? (message.length > 120 ? message.slice(0, 120) + '…' : message)
+        : '（未提供原因）'
+      const root = rootOf(session) ?? currentRoot
+      if (root !== undefined) currentRoot = root
+      notify('goal:' + String(goal?.id ?? '') + ':' + String(goal?.revision ?? ''), {
+        kind: 'goal',
+        title: titleOf(root) ?? titleOf(session) ?? 'Agent 回合',
+        status: '需要处理',
+        detail: '原因：' + reason,
       })
     }
   })
@@ -361,7 +486,9 @@ export function apply(ctx) {
     notify(String(agent.id), {
       kind: 'agent',
       title: titleOf(root) ?? titleOf(agent.session) ?? 'Agent 回合',
-      status: '结束',
+      // Enrich the generic 结束 with the last turn/end reason (完成/中止/
+      // 失败/超出上限/中断/阻塞), so abnormal stops stand out.
+      status: turnEndLabel(agent.session),
     })
   })
 

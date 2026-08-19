@@ -5,9 +5,8 @@
  *   off, solid with a small smartphone silhouette when push is on) opening a
  *   minimal glass configuration panel,
  * - the panel lives in `shell.overlay`,
- * - completion events arrive as WINDOWS system notifications (Web
- *   Notification API — the OS plays its default notification sound), polled
- *   through the taskNotify Remote every 2.5s,
+ * - the HOST fires every Windows toast / PushPlus push itself (the client
+ *   only polls settings every 10s to keep the bell and panel in sync),
  * - the panel keeps clear of the dsh-better-sidebar right/bottom panels by
  *   measuring their live DOM every animation frame (60fps drag following).
  *
@@ -461,7 +460,7 @@ export function apply(ctx) {
     if (!panelOpen) return null
     const settings = draft ?? lastSettings ?? {
       push: false, token: '', enabled: true, agent: false, subagent: true, workflow: true,
-      approval: true, question: true,
+      approval: true, question: true, plan: true, goal: true,
     }
     const masterOn = settings.enabled !== false
     const toggle = (key) => (event) => setDraft(Object.assign({}, settings, { [key]: event.target.checked }))
@@ -523,6 +522,8 @@ export function apply(ctx) {
       row('workflow', '工作流'),
       row('approval', '需要审批'),
       row('question', '询问用户'),
+      row('plan', '计划确认'),
+      row('goal', '目标受阻'),
     ]),
     section('push', true, [
       React.createElement('div', { className: 'dtn_row' },

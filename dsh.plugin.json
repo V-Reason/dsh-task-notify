@@ -1,7 +1,7 @@
 {
   "name": "dsh-task-notify",
-  "description": "Agent/subagent/workflow completion, approval-required, and user-question toasts with optional PushPlus push notifications",
-  "version": "1.1.0",
+  "description": "Agent/subagent/workflow completion, approval-required, plan-review, goal-blocked, and user-question toasts with optional PushPlus push notifications",
+  "version": "1.2.0",
   "entry": {
     "name": "dsh-task-notify",
     "inject": []
